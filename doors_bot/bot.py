@@ -289,6 +289,7 @@ class DoorsBot(commands.Bot):
             intents=intents,
             help_command=None,
         )
+        # Guild sessions use the guild ID; DM sessions use scope ID 0.
         self.sessions: dict[tuple[int, int], GameSession] = {}
         self.heartbeat_emoji = {
             "RED": "🔴",
@@ -317,34 +318,13 @@ class DoorsBot(commands.Bot):
 
     async def on_ready(self) -> None:
         if not self.synced:
-            if self.sync_guild_id is not None:
-                guilds: list[discord.abc.Snowflake] = [
-                    discord.Object(id=self.sync_guild_id)
-                ]
-            elif self.guilds:
-                # Guild-scoped commands update immediately. This avoids a
-                # stale global command definition during Discord's propagation
-                # window after a bot update.
-                guilds = list(self.guilds)
-            else:
-                synced = await self.tree.sync()
-                logger.info("Synced %d global slash commands", len(synced))
-                guilds = []
-            for guild in guilds:
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                logger.info(
-                    "Synced %d slash commands to guild %d",
-                    len(synced),
-                    guild.id,
-                )
-            if guilds:
-                # Do not leave a second global copy behind. Discord merges
-                # global and guild scopes in the client, which can display
-                # duplicate commands and route clicks to stale definitions.
-                self.tree.clear_commands(guild=None)
-                await self.tree.sync()
-                logger.info("Removed global command copies")
+            # DMs only receive global application commands. Clear any old
+            # server-scoped copies first, then sync the single global set.
+            for guild in self.guilds:
+                self.tree.clear_commands(guild=guild)
+                await self.tree.sync(guild=guild)
+            synced = await self.tree.sync()
+            logger.info("Synced %d global slash commands for servers and DMs", len(synced))
             self.synced = True
         logger.info("Logged in as %s", self.user)
 
@@ -357,9 +337,7 @@ class DoorsBot(commands.Bot):
             # global cache. Refresh the current guild copy and tell the player
             # to retry instead of letting the three-second interaction window
             # expire with no response.
-            if interaction.guild_id is not None:
-                guild = discord.Object(id=interaction.guild_id)
-                await self.tree.sync(guild=guild)
+            await self.tree.sync()
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     "The command list was refreshed. Please run that command again.",
@@ -367,9 +345,8 @@ class DoorsBot(commands.Bot):
                 )
 
     def session_for(self, interaction: discord.Interaction) -> Optional[GameSession]:
-        if interaction.guild_id is None:
-            return None
-        return self.sessions.get((interaction.guild_id, interaction.user.id))
+        scope_id = interaction.guild_id or 0
+        return self.sessions.get((scope_id, interaction.user.id))
 
     async def require_session(
         self, interaction: discord.Interaction
@@ -549,12 +526,7 @@ class DoorsBot(commands.Bot):
 
     @app_commands.command(name="start", description="Start a new DOORS Floor 1 run.")
     async def start_command(self, interaction: discord.Interaction) -> None:
-        if interaction.guild_id is None:
-            await interaction.response.send_message(
-                "Run this command in a server channel, not a DM.", ephemeral=True
-            )
-            return
-        key = (interaction.guild_id, interaction.user.id)
+        key = (interaction.guild_id or 0, interaction.user.id)
         old = self.sessions.get(key)
         if old:
             cancel_task(old.threat.task if old.threat else None)
@@ -570,7 +542,8 @@ class DoorsBot(commands.Bot):
         await interaction.response.send_message(
             "🚪 **DOORS — Floor 1**\n"
             "You enter at Door 1. Reach Door 100 alive.\n"
-            "Use `/next` to move. Use `/doors_help` if you need the command list."
+            "Use `/next` to move. Use `/doors_help` if you need the command list.\n"
+            "Your run is private to this conversation."
         )
 
     @app_commands.command(name="next", description="Advance 1–3 doors.")
@@ -962,12 +935,7 @@ class DoorsBot(commands.Bot):
 
     @app_commands.command(name="reset", description="Delete your active run.")
     async def reset_command(self, interaction: discord.Interaction) -> None:
-        if interaction.guild_id is None:
-            await interaction.response.send_message(
-                "Run this command in a server channel.", ephemeral=True
-            )
-            return
-        key = (interaction.guild_id, interaction.user.id)
+        key = (interaction.guild_id or 0, interaction.user.id)
         session = self.sessions.pop(key, None)
         if session:
             cancel_task(session.threat.task if session.threat else None)

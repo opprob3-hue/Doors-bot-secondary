@@ -318,19 +318,47 @@ class DoorsBot(commands.Bot):
     async def on_ready(self) -> None:
         if not self.synced:
             if self.sync_guild_id is not None:
-                guild = discord.Object(id=self.sync_guild_id)
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                logger.info(
-                    "Synced %d slash commands to test guild %d",
-                    len(synced),
-                    self.sync_guild_id,
-                )
+                guilds: list[discord.abc.Snowflake] = [
+                    discord.Object(id=self.sync_guild_id)
+                ]
+            elif self.guilds:
+                # Guild-scoped commands update immediately. This avoids a
+                # stale global command definition during Discord's propagation
+                # window after a bot update.
+                guilds = list(self.guilds)
             else:
                 synced = await self.tree.sync()
                 logger.info("Synced %d global slash commands", len(synced))
+                guilds = []
+            for guild in guilds:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                logger.info(
+                    "Synced %d slash commands to guild %d",
+                    len(synced),
+                    guild.id,
+                )
             self.synced = True
         logger.info("Logged in as %s", self.user)
+
+    async def on_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        logger.error("Slash command failed: %s", error, exc_info=error)
+        if isinstance(error, app_commands.CommandSignatureMismatch):
+            # A command interaction may have been opened from Discord's stale
+            # global cache. Refresh the current guild copy and tell the player
+            # to retry instead of letting the three-second interaction window
+            # expire with no response.
+            if interaction.guild_id is not None:
+                guild = discord.Object(id=interaction.guild_id)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "The command list was refreshed. Please run that command again.",
+                    ephemeral=True,
+                )
 
     def session_for(self, interaction: discord.Interaction) -> Optional[GameSession]:
         if interaction.guild_id is None:

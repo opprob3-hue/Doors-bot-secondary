@@ -43,10 +43,10 @@ python -m doors_bot.bot
 ```
 
 The project secret is automatically available as `DISCORD_TOKEN`. Keep the
-process running; Discord slash commands are registered when the bot connects.
-By default they are registered globally. For immediate command registration in
-one development server, also set the non-secret `DISCORD_GUILD_ID` environment
-variable to that server's numeric ID.
+process running; Discord slash commands are registered to connected servers
+when the bot connects. This avoids the delay Discord can apply to global
+command updates. For one specific development server, you can also set the
+non-secret `DISCORD_GUILD_ID` environment variable to that server's numeric ID.
 
 ## Run locally
 

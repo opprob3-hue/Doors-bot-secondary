@@ -338,6 +338,13 @@ class DoorsBot(commands.Bot):
                     len(synced),
                     guild.id,
                 )
+            if guilds:
+                # Do not leave a second global copy behind. Discord merges
+                # global and guild scopes in the client, which can display
+                # duplicate commands and route clicks to stale definitions.
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
+                logger.info("Removed global command copies")
             self.synced = True
         logger.info("Logged in as %s", self.user)
 
@@ -352,7 +359,6 @@ class DoorsBot(commands.Bot):
             # expire with no response.
             if interaction.guild_id is not None:
                 guild = discord.Object(id=interaction.guild_id)
-                self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
             if not interaction.response.is_done():
                 await interaction.response.send_message(

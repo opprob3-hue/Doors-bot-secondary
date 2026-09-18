@@ -301,20 +301,28 @@ class DoorsBot(commands.Bot):
         self.synced = False
 
     async def setup_hook(self) -> None:
-        self.tree.add_command(self.start_command)
-        self.tree.add_command(self.next_command)
-        self.tree.add_command(self.look_around_command)
-        self.tree.add_command(self.collect_command)
-        self.tree.add_command(self.closet_command)
-        self.tree.add_command(self.door_command)
-        self.tree.add_command(self.search_book_command)
-        self.tree.add_command(self.crack_code_command)
-        self.tree.add_command(self.status_command)
-        self.tree.add_command(self.crouch_command)
-        self.tree.add_command(self.left_command)
-        self.tree.add_command(self.right_command)
-        self.tree.add_command(self.doors_help_command)
-        self.tree.add_command(self.reset_command)
+        commands_to_add = (
+            self.start_command,
+            self.next_command,
+            self.look_around_command,
+            self.collect_command,
+            self.closet_command,
+            self.door_command,
+            self.search_book_command,
+            self.crack_code_command,
+            self.status_command,
+            self.crouch_command,
+            self.left_command,
+            self.right_command,
+            self.doors_help_command,
+            self.reset_command,
+        )
+        for command in commands_to_add:
+            # Commands declared on a Bot subclass are class descriptors. Set
+            # their binding explicitly so callbacks receive the live bot
+            # instance instead of being invoked as unbound functions.
+            command.binding = self
+            self.tree.add_command(command)
 
     async def on_ready(self) -> None:
         if not self.synced:

@@ -1,18 +1,19 @@
-# [Project name]
+# DOORS Discord Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Python `discord.py` bot that runs concurrent, text-based DOORS Floor 1 sessions with timed threats and interactive QTEs.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `python -m doors_bot.bot` — run the Discord bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `DISCORD_TOKEN` — Discord bot token
 
 ## Stack
 
+- Python 3 with `discord.py`
 - pnpm workspaces, Node.js 24, TypeScript 5.9
 - API: Express 5
 - DB: PostgreSQL + Drizzle ORM
@@ -22,15 +23,20 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `doors_bot/bot.py` — game state machine, slash commands, timers, and button QTEs
+- `requirements.txt` — Python dependency
+- `README.md` — Discord setup and run instructions
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Sessions are keyed by `(guild_id, user_id)` so players can run concurrently without sharing state.
+- Per-session asyncio locks protect transitions when a slash command and timeout happen together.
+- Threat and QTE timers are cancellable tasks; a process restart intentionally resets active runs.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Slash-command DOORS Floor 1 game with locked rooms, coins, Rush, Ambush, Dupe, Seek, and Figure.
+- Interactive Discord buttons handle the strict Seek and heartbeat quick-time events.
 
 ## User preferences
 

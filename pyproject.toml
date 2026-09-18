@@ -1,0 +1,8 @@
+[project]
+name = "doors-discord-bot"
+version = "0.1.0"
+description = "A text-based DOORS Floor 1 Discord bot."
+requires-python = ">=3.13"
+dependencies = [
+    "discord-py>=2.7.1",
+]

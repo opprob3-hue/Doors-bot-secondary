@@ -113,6 +113,7 @@ class GameSession:
     switches_found: int = 0
     door100_code: str = ""
     door100_switches: list[bool] = field(default_factory=lambda: [False] * 10)
+    room_messages: list[discord.Message] = field(default_factory=list, repr=False)
 
     @property
     def busy(self) -> bool:
@@ -409,10 +410,12 @@ class JeffShopView(GameButtonView):
                 session.inventory.add(self.item_id)
                 self.disabled = True
                 await interaction.response.edit_message(view=self.view)
-                await interaction.followup.send(
+                msg = await interaction.followup.send(
                     f"🪙 Jeff nods happily and slides you the **{self.item_name}** ({self.desc})! Remaining gold: **{session.wallet}g**",
                     ephemeral=False
                 )
+                if msg:
+                    session.room_messages.append(msg)
 
 
 class InfirmaryView(GameButtonView):
@@ -820,6 +823,31 @@ class DoorsBot(commands.Bot):
         except discord.HTTPException:
             pass
 
+    async def clear_room_messages(self, session: GameSession) -> None:
+        """Deletes messages from the previous room so players cannot cheat on Dupe or previous rooms."""
+        if not session.room_messages:
+            return
+        msgs = list(session.room_messages)
+        session.room_messages.clear()
+        for msg in msgs:
+            try:
+                await msg.delete()
+            except discord.HTTPException:
+                pass
+
+    async def send_tracked(
+        self, session: GameSession, content: Optional[str] = None, **kwargs
+    ) -> Optional[discord.Message]:
+        channel = session.last_channel
+        if channel is None:
+            return None
+        try:
+            msg = await channel.send(content=content, **kwargs)
+            session.room_messages.append(msg)
+            return msg
+        except discord.HTTPException:
+            return None
+
     async def require_session(self, interaction: discord.Interaction) -> Optional[GameSession]:
         key = (interaction.guild_id or 0, interaction.user.id)
         session = self.sessions.get(key)
@@ -855,7 +883,7 @@ class DoorsBot(commands.Bot):
         else:
             lines.append(f"🪙 A small stack of gold rests on a table. Type `/loot` to claim it.")
 
-        await channel.send("\n".join(lines))
+        await self.send_tracked(session, "\n".join(lines))
 
         if not session.locked and door >= 10:
             await self.roll_room_event(session)
@@ -875,20 +903,20 @@ class DoorsBot(commands.Bot):
                         session.badges.add("Evil Be Gone")
                         session.eyes_active = False
                         session.entities_survived.add("Eyes")
-                        if session.last_channel:
-                            await session.last_channel.send(
-                                "✝️ The Crucifix illuminates the room! **Eyes** is engulfed in blue chains and banished!"
-                            )
+                        await self.send_tracked(
+                            session,
+                            "✝️ The Crucifix illuminates the room! **Eyes** is engulfed in blue chains and banished!"
+                        )
                         break
 
                     session.health -= 10
                     if session.health <= 0:
                         await self.kill_session(session, "💀 You stared at Eyes for too long.", "Eyes")
                         break
-                    if session.last_channel:
-                        await session.last_channel.send(
-                            f"👁️ **Eyes drains 10 HP!** Don't look at it! Health: **{session.health}/100**"
-                        )
+                    await self.send_tracked(
+                        session,
+                        f"👁️ **Eyes drains 10 HP!** Don't look at it! Health: **{session.health}/100**"
+                    )
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             return
@@ -900,12 +928,12 @@ class DoorsBot(commands.Bot):
             async with session.lock:
                 if not session.screech_active:
                     return
-                if session.last_channel:
-                    await session.last_channel.send(
-                        "**Psst!** 👂 You hear a whisper right by your ear!\n"
-                        "Quick, turn around!",
-                        view=ScreechView(self, session),
-                    )
+                await self.send_tracked(
+                    session,
+                    "**Psst!** 👂 You hear a whisper right by your ear!\n"
+                    "Quick, turn around!",
+                    view=ScreechView(self, session),
+                )
             qte_time = 2.0 + (2.0 if "vitamins" in session.inventory else 0.0)
             await asyncio.sleep(qte_time)
             async with session.lock:
@@ -916,15 +944,15 @@ class DoorsBot(commands.Bot):
                         session.badges.add("Evil Be Gone")
                         session.screech_active = False
                         session.entities_survived.add("Screech")
-                        if session.last_channel:
-                            await session.last_channel.send("✝️ The Crucifix activates! **Screech** is blasted into the void.")
+                        await self.send_tracked(session, "✝️ The Crucifix activates! **Screech** is blasted into the void.")
                     else:
                         session.health -= 40
                         session.screech_active = False
                         if session.health <= 0:
                             await self.kill_session(session, "💀 Screech attacked you in the pitch dark.", "Screech")
-                        elif session.last_channel:
-                            await session.last_channel.send(
+                        else:
+                            await self.send_tracked(
+                                session,
                                 f"💀 **SCREECH BITES YOU!** You take 40 damage. Health: **{session.health}/100**"
                             )
         except asyncio.CancelledError:
@@ -942,17 +970,13 @@ class DoorsBot(commands.Bot):
                         session.badges.add("Evil Be Gone")
                         session.halt_active = False
                         session.entities_survived.add("Halt")
-                        if session.last_channel:
-                            await session.last_channel.send("✝️ The Crucifix activates! **Halt** is banished from the hallway.")
+                        await self.send_tracked(session, "✝️ The Crucifix activates! **Halt** is banished from the hallway.")
                     else:
                         await self.kill_session(session, "💀 You hesitated in Halt's hallway.", "Halt")
         except asyncio.CancelledError:
             return
 
     async def roll_room_event(self, session: GameSession) -> None:
-        channel = session.last_channel
-        if channel is None:
-            return
         roll = random.randint(1, 100)
 
         # Halt (Doors 55-65)
@@ -961,7 +985,8 @@ class DoorsBot(commands.Bot):
             session.halt_step = 0
             session.halt_expected = "TURN AROUND"
             session.halt_task = asyncio.create_task(self.halt_timeout(session, 0))
-            await channel.send(
+            await self.send_tracked(
+                session,
                 "🔵 **HALT CHASE**\nThe corridor turns electric blue. A distorted silhouette appears ahead...",
                 view=HaltView(self, session, "TURN AROUND"),
             )
@@ -971,29 +996,29 @@ class DoorsBot(commands.Bot):
         if session.current_door >= 53 and 21 <= roll <= 38:
             session.eyes_active = True
             session.eyes_task = asyncio.create_task(self.eyes_timeout(session))
-            await channel.send(
+            await self.send_tracked(
+                session,
                 "👁️ **LOOK AWAY!**\nA blinding purple aurora and clicking sound fills the room! Click the button immediately!",
                 view=EyesView(self, session),
             )
             return
 
         # Dark Room / Screech
-        # Doors 90-98 (Greenhouse) are permanently dark. Other rooms 25% dark.
         is_dark = (90 <= session.current_door <= 98) or (39 <= roll <= 58)
         if is_dark:
-            await channel.send("🌑 **The lights are broken. The room is pitch black.**")
+            await self.send_tracked(session, "🌑 **The lights are broken. The room is pitch black.**")
             if "flashlight" not in session.inventory:
                 if random.randint(1, 100) <= 60:
                     session.screech_active = True
                     session.screech_task = asyncio.create_task(self.screech_timeout(session))
             else:
-                await channel.send("🔦 Your Flashlight illuminates the gloom, keeping Screech away.")
+                await self.send_tracked(session, "🔦 Your Flashlight illuminates the gloom, keeping Screech away.")
 
         # Greenhouse Logic (Doors 90-98)
         if 90 <= session.current_door <= 98:
             if random.random() < 0.25:
                 session.snared_until = clock() + 3.0
-                await channel.send("🌿 **SNAP!** You stepped on a Snare! You are trapped for 3 seconds.")
+                await self.send_tracked(session, "🌿 **SNAP!** You stepped on a Snare! You are trapped for 3 seconds.")
 
             if random.randint(1, 100) <= 30:
                 await self.start_threat(session, "rush", silent=True)
@@ -1007,9 +1032,6 @@ class DoorsBot(commands.Bot):
                 await self.start_threat(session, "rush")
 
     async def start_threat(self, session: GameSession, kind: str, silent: bool = False) -> None:
-        channel = session.last_channel
-        if channel is None:
-            return
         threat = ThreatState(kind=kind, required_closet_uses=3 if kind == "ambush" else 1)
         session.threat = threat
 
@@ -1030,7 +1052,7 @@ class DoorsBot(commands.Bot):
                     "⚠️ **ALERT: The lights flicker violently! RUSH arrives in 5 seconds!**\n"
                     "Quick! Hide in a closet using `/hide` or `/closet`!"
                 )
-        await channel.send(prompt)
+        await self.send_tracked(session, prompt)
         threat.task = asyncio.create_task(self.threat_timeout(session))
 
     async def threat_timeout(self, session: GameSession) -> None:
@@ -1046,10 +1068,10 @@ class DoorsBot(commands.Bot):
                         entity = session.threat.kind.capitalize()
                         session.entities_survived.add(entity)
                         session.threat = None
-                        if session.last_channel:
-                            await session.last_channel.send(
-                                f"✝️ The Crucifix bursts with holy light! **{entity}** is banished to the ground."
-                            )
+                        await self.send_tracked(
+                            session,
+                            f"✝️ The Crucifix bursts with holy light! **{entity}** is banished to the ground."
+                        )
                     else:
                         await self.kill_session(
                             session,
@@ -1072,8 +1094,7 @@ class DoorsBot(commands.Bot):
                         session.badges.add("Evil Be Gone")
                         session.entities_survived.add("Seek")
                         session.seek = None
-                        if session.last_channel:
-                            await session.last_channel.send("✝️ The Crucifix activates! **Seek** is banished. The chase ends.")
+                        await self.send_tracked(session, "✝️ The Crucifix activates! **Seek** is banished. The chase ends.")
                     else:
                         await self.kill_session(
                             session,
@@ -1129,7 +1150,7 @@ class DoorsBot(commands.Bot):
                 "Seek": "Follow the guiding light during the chase. Vitamins can give you extra time!",
                 "Figure": "Figure is blind but hears footsteps and heartbeats. Crouch quietly.",
                 "Timothy": "Timothy lurks in drawers when looting. Keep your health high.",
-                "Dupe": "Pay attention to the number of the door you just came through.",
+                "Dupe": "Pay attention to the number of the door you just came through. Messages get cleared on /next!",
                 "Hide": "You cannot stay in closets forever. Hide will push you out after 8 seconds!",
                 "Eyes": "When a purple glow appears, do NOT look! Press [LOOK AWAY] immediately.",
                 "Screech": "Listen for the 'Psst!' in dark rooms and turn around, or carry a Flashlight.",
@@ -1138,13 +1159,15 @@ class DoorsBot(commands.Bot):
             }
             hint_text = hints.get(entity_hint, "Learn from your mistakes and listen closely to audio cues.")
             embed.add_field(name="Canonical Advice", value=f"*{hint_text}*")
-            await channel.send(embed=embed)
+            msg = await channel.send(embed=embed)
+            session.room_messages.append(msg)
 
     @app_commands.command(name="start", description="Start a new DOORS Floor 1 run.")
     async def start_command(self, interaction: discord.Interaction) -> None:
         key = (interaction.guild_id or 0, interaction.user.id)
         old = self.sessions.get(key)
         if old:
+            await self.clear_room_messages(old)
             cancel_task(old.threat.task if old.threat else None)
             cancel_task(old.seek.task if old.seek else None)
             cancel_task(old.heartbeat.task if old.heartbeat else None)
@@ -1164,10 +1187,15 @@ class DoorsBot(commands.Bot):
             "🚪 **DOORS — Floor 1 Hotel**\n"
             "You unlock the lobby doors and step inside. Reach Door 100 alive.\n"
             "Use `/next` (1–2 doors) to move. Use `/loot` for gold. Use `/hide` when danger nears.\n"
-            "Your session is private to your account."
+            "💡 *Tip: Messages from past rooms are cleared on `/next` to make Dupe authentic! Remember your door numbers.*"
         )
+        try:
+            orig = await interaction.original_response()
+            session.room_messages.append(orig)
+        except Exception:
+            pass
 
-    @app_commands.command(name="next", description="Advance 1–2 doors.")
+    @app_commands.command(name="next", description="Advance 1–2 doors (clears previous room messages).")
     @app_commands.describe(amount="Number of doors to advance (1–2).")
     async def next_command(
         self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 2] = 1
@@ -1213,6 +1241,10 @@ class DoorsBot(commands.Bot):
                 session.key_found = False
                 session.inventory.discard("room_key")
 
+            # CLEAR PAST ROOM MESSAGES:
+            # This deletes the previous room text so players cannot scroll up to cheat on Dupe!
+            await self.clear_room_messages(session)
+
             target = session.current_door + amount
 
             # Enforce mandatory stops
@@ -1238,6 +1270,11 @@ class DoorsBot(commands.Bot):
                     "Press **[PULL LEVER]** to begin the power sequence!",
                     view=FigureEncounterView(self, session),
                 )
+                try:
+                    orig = await interaction.original_response()
+                    session.room_messages.append(orig)
+                except Exception:
+                    pass
                 return
 
             # Dupe Hallway (chance on moving 2 doors)
@@ -1248,8 +1285,14 @@ class DoorsBot(commands.Bot):
                     "🚪 **DUPE HALLWAY**\n"
                     "Two doors stand before you in the gloom.\n"
                     f"One is marked **Door {correct}**, the other **Door {correct - 1}**.\n"
-                    "Use `/door number` to choose. Picking the fake door deals **40 damage**!",
+                    "Use `/door number` to choose. Picking the fake door deals **40 damage**!\n"
+                    "*(Past room messages were cleared — did you remember your door number?)*",
                 )
+                try:
+                    orig = await interaction.original_response()
+                    session.room_messages.append(orig)
+                except Exception:
+                    pass
                 return
 
             session.current_door = target
@@ -1264,6 +1307,11 @@ class DoorsBot(commands.Bot):
                     "It is completely blind, but hears every sound.\n"
                     "Collect 5 book fragments using `/search_book`. Crouch with `/crouch` if it approaches.",
                 )
+                try:
+                    orig = await interaction.original_response()
+                    session.room_messages.append(orig)
+                except Exception:
+                    pass
                 return
 
             # Door 52 Jeff's Shop (Mandatory stop)
@@ -1275,6 +1323,11 @@ class DoorsBot(commands.Bot):
                     f"Your Wallet: **{session.wallet}g**",
                     view=JeffShopView(self, session),
                 )
+                try:
+                    orig = await interaction.original_response()
+                    session.room_messages.append(orig)
+                except Exception:
+                    pass
                 return
 
             # Door 53 Infirmary (Secret room with Skeleton Key)
@@ -1286,6 +1339,11 @@ class DoorsBot(commands.Bot):
                         "You hold a **Skeleton Key**! You can unlock the ward to fully heal and find supplies.",
                         view=InfirmaryView(self, session),
                     )
+                    try:
+                        orig = await interaction.original_response()
+                        session.room_messages.append(orig)
+                    except Exception:
+                        pass
                     return
 
             # Seek Chases (Door 30 or Door 70)
@@ -1298,9 +1356,6 @@ class DoorsBot(commands.Bot):
             await self.send_room_entry(session)
 
     async def start_seek(self, session: GameSession) -> None:
-        channel = session.last_channel
-        if channel is None:
-            return
         chase_type = 2 if session.current_door >= 70 else 1
         options = ["LEFT", "RIGHT", "DUCK", "AVOID"] if chase_type == 2 else ["LEFT", "RIGHT", "CROUCH"]
         sequence = [random.choice(options) for _ in range(7 if chase_type == 2 else 5)]
@@ -1318,14 +1373,15 @@ class DoorsBot(commands.Bot):
         }.get(sequence[0], sequence[0])
 
         title = "🔥 **SEEK CHASE #2 — THE BURNING HALLWAY**" if chase_type == 2 else "👁️ **SEEK CHASE INITIATED**"
-        msg = (
+        msg_text = (
             f"{title}\n"
             "Seek erupts from the floor in a surge of black slime!\n"
             f"🔵 Guiding Light marks your first path: **{first_display}**\n"
             f"Click the matching button within **{wait_time:.1f} seconds**!"
         )
-        challenge.message = await channel.send(
-            msg,
+        challenge.message = await self.send_tracked(
+            session,
+            msg_text,
             view=SeekView(self, session, chase_type=chase_type),
         )
 
@@ -1357,7 +1413,8 @@ class DoorsBot(commands.Bot):
                     return
                 session.key_found = True
                 session.inventory.add("room_key")
-                await interaction.channel.send(
+                await self.send_tracked(
+                    session,
                     f"🔑 **Key Discovered!** You found the key behind a bookshelf. Use `/next 1` to proceed."
                 )
         finally:
@@ -1393,6 +1450,11 @@ class DoorsBot(commands.Bot):
                 await interaction.response.send_message(
                     f"🪙 You collected **{amount} gold**! Wallet: **{session.wallet}g**"
                 )
+            try:
+                orig = await interaction.original_response()
+                session.room_messages.append(orig)
+            except Exception:
+                pass
 
     async def hide_timeout(self, session: GameSession) -> None:
         try:
@@ -1402,11 +1464,11 @@ class DoorsBot(commands.Bot):
                     session.hiding = False
                     session.health -= 40
                     session.hide_task = None
-                    channel = session.last_channel
                     if session.health <= 0:
                         await self.kill_session(session, "💀 Hide forcefully threw you out of the closet.", "Hide")
-                    elif channel:
-                        await channel.send(
+                    else:
+                        await self.send_tracked(
+                            session,
                             f"💀 **HIDE ATTACKS!** You stayed in the closet for over 8 seconds!\n"
                             f"Hide violently ejects you for 40 damage. Health: **{session.health}/100**"
                         )
@@ -1450,8 +1512,7 @@ class DoorsBot(commands.Bot):
                         "🚪 You yank the closet shut. Rush roars past, shattering every lightbulb before fading into silence.",
                         view=ClosetView(self, session),
                     )
-                    return
-                if threat.closet_uses >= threat.required_closet_uses:
+                elif threat.closet_uses >= threat.required_closet_uses:
                     cancel_task(threat.task)
                     session.threat = None
                     session.entities_survived.add("Ambush")
@@ -1459,17 +1520,22 @@ class DoorsBot(commands.Bot):
                         "🚪 Ambush screams past for the final time. It gives up and retreats into the darkness!",
                         view=ClosetView(self, session),
                     )
-                    return
-                await interaction.response.send_message(
-                    f"🚪 Ambush screams past, but turns around! Quickly exit and re-enter!\n"
-                    f"Passes survived: **{threat.closet_uses}/{threat.required_closet_uses}**",
-                    view=ClosetView(self, session),
-                )
+                else:
+                    await interaction.response.send_message(
+                        f"🚪 Ambush screams past, but turns around! Quickly exit and re-enter!\n"
+                        f"Passes survived: **{threat.closet_uses}/{threat.required_closet_uses}**",
+                        view=ClosetView(self, session),
+                    )
             else:
                 await interaction.response.send_message(
                     "🚪 You slip into a closet. Keep an ear out—staying longer than 8s will anger Hide!",
                     view=ClosetView(self, session),
                 )
+            try:
+                orig = await interaction.original_response()
+                session.room_messages.append(orig)
+            except Exception:
+                pass
 
     @app_commands.command(name="door", description="Choose a door number in a Dupe hallway.")
     @app_commands.describe(number="The door number to enter.")
@@ -1485,6 +1551,10 @@ class DoorsBot(commands.Bot):
 
             challenge = session.dupe
             session.dupe = None
+
+            # Clear Dupe prompt message
+            await self.clear_room_messages(session)
+
             if number != challenge.correct_door:
                 session.health -= 40
                 if session.health <= 0:
@@ -1495,12 +1565,22 @@ class DoorsBot(commands.Bot):
                     f"❌ **DUPE ATTACKS!** The door slammed shut on your face dealing 40 damage!\n"
                     f"Health: **{session.health}/100**. The genuine door was **Door {challenge.correct_door}**. Proceeding..."
                 )
+                try:
+                    orig = await interaction.original_response()
+                    session.room_messages.append(orig)
+                except Exception:
+                    pass
                 session.current_door = challenge.correct_door
                 await self.send_room_entry(session)
                 return
 
             session.current_door = challenge.correct_door
             await interaction.response.send_message(f"✅ Correct! Door {challenge.correct_door} opens safely.")
+            try:
+                orig = await interaction.original_response()
+                session.room_messages.append(orig)
+            except Exception:
+                pass
             await self.send_room_entry(session)
 
     @app_commands.command(name="search_book", description="Search the Library for a code fragment (Door 50).")
@@ -1535,21 +1615,25 @@ class DoorsBot(commands.Bot):
                     challenge.task = asyncio.create_task(self.heartbeat_timeout(session, 0))
                     shown = " ".join(self.heartbeat_emoji[c] for c in seq)
                     qte_time = QTE_SECONDS + (2.0 if "vitamins" in session.inventory else 0.0)
-                    await interaction.followup.send(
+                    msg = await interaction.followup.send(
                         "💓 **HEARTBEAT MINIGAME**\n"
                         "Figure steps nearby! Match the heartbeat rhythm:\n"
                         f"{shown}\n"
                         f"First color: **{seq[0]}** (You have {qte_time:.1f}s)",
                         view=HeartbeatView(self, session),
                     )
+                    if msg:
+                        session.room_messages.append(msg)
                 else:
                     session.books_found += 1
                     fragment = session.library_code[session.books_found - 1]
-                    await interaction.followup.send(
+                    msg = await interaction.followup.send(
                         f"📖 You found a glowing Library Book! Code fragment **{session.books_found}/5**: "
                         f"Digit **#{session.books_found} = {fragment}**\n"
                         f"Books collected: **{session.books_found}/5**"
                     )
+                    if msg:
+                        session.room_messages.append(msg)
         finally:
             session.searching_book = False
 
@@ -1584,12 +1668,14 @@ class DoorsBot(commands.Bot):
                 session.heartbeat = challenge
                 challenge.task = asyncio.create_task(self.heartbeat_timeout(session, 0))
                 shown = " ".join(self.heartbeat_emoji[c] for c in seq)
-                await interaction.followup.send(
+                msg = await interaction.followup.send(
                     "💓 **FIGURE DETECTS YOU!**\n"
                     "Match the heartbeats to stay silent:\n"
                     f"{shown}\nFirst color: **{seq[0]}**",
                     view=HeartbeatView(self, session),
                 )
+                if msg:
+                    session.room_messages.append(msg)
                 return
 
             session.switches_found += 1
@@ -1598,16 +1684,20 @@ class DoorsBot(commands.Bot):
                 target_str = " | ".join(
                     f"{i+1}:{'ON' if c == '1' else 'OFF'}" for i, c in enumerate(session.door100_code)
                 )
-                await interaction.followup.send(
+                msg = await interaction.followup.send(
                     f"⚡ **ALL 10 BREAKER SWITCHES COLLECTED! (10/10)**\n"
                     f"**TARGET CODE:** `{target_str}`\n"
                     "Toggle the 10 switches to match the code, then click **[⚡ SUBMIT CODE]**!",
                     view=BreakerPuzzleView(self, session),
                 )
+                if msg:
+                    session.room_messages.append(msg)
             else:
-                await interaction.followup.send(
+                msg = await interaction.followup.send(
                     f"⚡ You grabbed a circuit breaker switch from a metal shelf! Progress: **{session.switches_found}/10**"
                 )
+                if msg:
+                    session.room_messages.append(msg)
 
     @app_commands.command(name="crack_code", description="Enter the 5-digit Library exit code (Door 50).")
     @app_commands.describe(code="The 5-digit code.")
@@ -1635,6 +1725,11 @@ class DoorsBot(commands.Bot):
             await interaction.response.send_message(
                 "🔓 **BEEP-CLICK!** The heavy padlock snaps open! You slip through into Door 51 and bolt the door behind you."
             )
+            try:
+                orig = await interaction.original_response()
+                session.room_messages.append(orig)
+            except Exception:
+                pass
 
     @app_commands.command(name="talk", description="Talk to El Goblino at Door 52 (Jeff's Shop).")
     async def talk_command(self, interaction: discord.Interaction) -> None:
@@ -1654,8 +1749,14 @@ class DoorsBot(commands.Bot):
                 "Figure is blind as a bat, but he's got super hearing. Crouch down and hold your breath!",
                 "That Skeleton Key? Jeff says it unlocks the old Infirmary past Door 52. Lots of medicine in there!",
                 "When you see Eyes' purple glow, DO NOT LOOK AT IT. Click Look Away immediately!",
+                "Pay attention to the door numbers! Dupe loves messing with people who don't memorize the door they just came from.",
             ]
             await interaction.response.send_message(f"👹 **El Goblino:** \"{random.choice(tips)}\"")
+            try:
+                orig = await interaction.original_response()
+                session.room_messages.append(orig)
+            except Exception:
+                pass
 
     @app_commands.command(name="crouch", description="Crouch quietly in the Library (Door 50).")
     async def crouch_command(self, interaction: discord.Interaction) -> None:
@@ -1663,6 +1764,11 @@ class DoorsBot(commands.Bot):
         if session is None:
             return
         await interaction.response.send_message("🫥 You crouch behind the bookshelves. The heavy footsteps thud past.", ephemeral=False)
+        try:
+            orig = await interaction.original_response()
+            session.room_messages.append(orig)
+        except Exception:
+            pass
 
     @app_commands.command(name="left", description="Choose LEFT during Seek chase (fallback).")
     async def left_command(self, interaction: discord.Interaction) -> None:
@@ -1719,7 +1825,7 @@ class DoorsBot(commands.Bot):
             title="📖 DOORS Floor 1 Survival Manual",
             description=(
                 "`/start` — Start or restart a Floor 1 run\n"
-                "`/next [1-2]` — Advance 1–2 doors (4s cooldown)\n"
+                "`/next [1-2]` — Advance 1–2 doors (clears past room messages)\n"
                 "`/loot` — Collect coins (10–50g, 5% Timothy chance)\n"
                 "`/hide` or `/closet` — Hide in a closet (safe up to 8s max!)\n"
                 "`/look_around` — Search locked rooms for the key (5–7s)\n"
@@ -1734,6 +1840,7 @@ class DoorsBot(commands.Bot):
             ),
             color=0x2B82D9,
         )
+        embed.set_footer(text="Notice: Past room messages get deleted on /next so Dupe cannot be cheated!")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="reset", description="Delete and reset your active run.")
@@ -1741,6 +1848,7 @@ class DoorsBot(commands.Bot):
         key = (interaction.guild_id or 0, interaction.user.id)
         session = self.sessions.pop(key, None)
         if session:
+            await self.clear_room_messages(session)
             cancel_task(session.threat.task if session.threat else None)
             cancel_task(session.seek.task if session.seek else None)
             cancel_task(session.heartbeat.task if session.heartbeat else None)

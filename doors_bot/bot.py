@@ -797,8 +797,6 @@ class DoorsBot(commands.Bot):
         self.tree.add_command(self.search_book_command)
         self.tree.add_command(self.crack_code_command)
         self.tree.add_command(self.crouch_command)
-        self.tree.add_command(self.left_command)
-        self.tree.add_command(self.right_command)
         self.tree.add_command(self.status_command)
         self.tree.add_command(self.doors_help_command)
         self.tree.add_command(self.reset_command)
@@ -1769,24 +1767,6 @@ class DoorsBot(commands.Bot):
             session.room_messages.append(orig)
         except Exception:
             pass
-
-    @app_commands.command(name="left", description="Choose LEFT during Seek chase (fallback).")
-    async def left_command(self, interaction: discord.Interaction) -> None:
-        session = await self.require_session(interaction)
-        if session and session.seek:
-            view = SeekView(self, session)
-            await view.handle_action(interaction, "LEFT")
-        else:
-            await interaction.response.send_message("No active Seek chase.", ephemeral=True)
-
-    @app_commands.command(name="right", description="Choose RIGHT during Seek chase (fallback).")
-    async def right_command(self, interaction: discord.Interaction) -> None:
-        session = await self.require_session(interaction)
-        if session and session.seek:
-            view = SeekView(self, session)
-            await view.handle_action(interaction, "RIGHT")
-        else:
-            await interaction.response.send_message("No active Seek chase.", ephemeral=True)
 
     @app_commands.command(name="status", description="Inspect your current run stats and inventory.")
     async def status_command(self, interaction: discord.Interaction) -> None:
